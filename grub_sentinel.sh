@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =============================================================================
-# GRUB SENTINEL v0.5 - STABLE RELEASE
+# GRUB SENTINEL v0.6.2 - CLEAN PARSE RELEASE
 # GitHub: https://github.com/zemcoviv/grub_sentinel
 # License: MIT
 # =============================================================================
@@ -19,6 +19,9 @@ readonly NC='\033[0m'
 readonly BOLD='\033[1m'
 
 LOG_FILE="/tmp/grub_sentinel.log"
+
+# ИСПРАВЛЕНИЕ 1: Принудительное удаление старого лога во избежание конфликта прав
+rm -f "$LOG_FILE"
 : > "$LOG_FILE"
 
 # --- Параметры ---
@@ -30,7 +33,7 @@ show_help() {
 Использование: $0 [--dry-run] [--backup-dir DIR] [--help]
 
 Опции:
-  --dry-run        Выполнить "прогоны" без реального изменения системы (показывает, что бы было сделано)
+  --dry-run        Выполнить "прогоны" без реального изменения системы
   --backup-dir DIR Папка для резервных копий (по умолчанию: $BACKUP_DIR)
   --help           Показать это сообщение
 EOF
@@ -40,7 +43,7 @@ EOF
 print_header() {
     clear
     echo -e "${C}┌──────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${C}│${BOLD}          GRUB SENTINEL - STABLE RELEASE v0.5           ${C}│${NC}"
+    echo -e "${C}│${BOLD}          GRUB SENTINEL - CLEAN PARSE v0.6.2            ${C}│${NC}"
     echo -e "${C}└──────────────────────────────────────────────────────────┘${NC}"
     echo -e " Лог: ${Y}$LOG_FILE${NC}\n"
     if [ "$DRY_RUN" = true ]; then
@@ -62,7 +65,7 @@ spinner() {
     printf "   \b\b\b"
 }
 
-# run_task принимает описание и команду в виде строки (bash -c "...")
+# run_task для фоновых задач
 run_task() {
     local desc="$1"
     local cmd="$2"
@@ -91,7 +94,7 @@ backup_files() {
     local dest="${BACKUP_DIR}/grub_sentinel_backup_${ts}.tar.gz"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Создать бэкап в: $dest (файлы: ${files[*]})" >> "$LOG_FILE"
+        echo "[DRY-RUN] Создать бэкап в: $dest" >> "$LOG_FILE"
         echo -e "${Y}→ Бэкап пропущен (dry-run)${NC}"
         return 0
     fi
@@ -122,7 +125,7 @@ fast_fix() {
 apply_gfx_settings() {
     local cmd="
         cp -a /etc/default/grub /etc/default/grub.bak || true
-        sed -i '/GRUB_GFXMODE=/d;/GRUB_TERMINAL=/d;/GRUB_GFXPAYLOAD_LINUX=/d;/GRUB_THEME=/d' /etc/default/grub
+        sed -i '/GRUB_GFXMODE=/d;/GRUB_TERMINAL=/d;/GRUB_GFXPAYLOAD_LINUX=/d' /etc/default/grub
         {
             echo 'GRUB_GFXMODE=1920x1080,1280x720,auto'
             echo 'GRUB_TERMINAL=gfxterm'
@@ -132,21 +135,97 @@ apply_gfx_settings() {
     run_task "Настройка графического вывода (HiDPI)" "$cmd"
 }
 
-install_theme_stable() {
+prepare_themes() {
     local cmd="
         apt-get update
-        apt-get install -y grub2-themes-ubuntu-mate || apt-get install -y grub2-common
-        THEME_PATH=\$(find /boot/grub/themes -name 'theme.txt' | head -n 1 || true)
-        if [ -n \"\$THEME_PATH\" ]; then
-            grep -q \"^GRUB_THEME=\" /etc/default/grub || true
-            echo \"GRUB_THEME='\$THEME_PATH'\" >> /etc/default/grub
-        else
-            mkdir -p /boot/grub/themes/default
-            echo \"GRUB_THEME='/boot/grub/themes/default/theme.txt'\" >> /etc/default/grub
-        fi
+        apt-get install -y grub2-themes-ubuntu-mate grub2-common || true
+        mkdir -p /boot/grub/themes
     "
-    run_task "Установка графической темы (Grub2-Themes)" "$cmd"
+    run_task "Установка пакетов тем" "$cmd"
 }
+
+# --- ИНТЕРАКТИВНЫЕ ФУНКЦИИ ---
+
+select_theme_interactive() {
+    echo -e "\n${BOLD}→ Выбор темы оформления:${NC}"
+    
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "${Y}  (Пропущено в dry-run)${NC}"
+        return 0
+    fi
+
+    local theme_files=($(find /boot/grub/themes /usr/share/grub/themes -name "theme.txt" 2>/dev/null))
+    
+    if [ ${#theme_files[@]} -eq 0 ]; then
+        echo -e "${Y}  Темы не найдены. Будет использована стандартная.${NC}"
+        return 0
+    fi
+
+    echo "  0) Отключить тему (стандартная)"
+    local i=1
+    for theme in "${theme_files[@]}"; do
+        local theme_name=$(basename "$(dirname "$theme")")
+        echo "  $i) $theme_name ($theme)"
+        ((i++))
+    done
+
+    local choice
+    read -p "  Ваш выбор [0-$((${#theme_files[@]}))]: " choice
+
+    sed -i '/GRUB_THEME=/d' /etc/default/grub
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -gt 0 ] && [ "$choice" -le ${#theme_files[@]} ]; then
+        local selected="${theme_files[$((choice-1))]}"
+        echo "GRUB_THEME='$selected'" >> /etc/default/grub
+        echo -e "${G}  ✔ Установлена тема: $(basename "$(dirname "$selected")")${NC}"
+    else
+        echo -e "${Y}  ✔ Тема отключена (используется стандартная)${NC}"
+    fi
+}
+
+select_boot_priority() {
+    echo -e "\n${BOLD}→ Выбор приоритета загрузки:${NC}"
+    
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "${Y}  (Пропущено в dry-run)${NC}"
+        return 0
+    fi
+
+    if [ ! -f /boot/grub/grub.cfg ]; then
+        echo -e "${R}  Файл grub.cfg не найден! Сначала выполните восстановление.${NC}"
+        return 1
+    fi
+
+    # ИСПРАВЛЕНИЕ 2: Улучшенный парсинг, учитывающий отступы (табы/пробелы)
+    mapfile -t entries < <(grep -E "^[[:space:]]*menuentry ['\"]" /boot/grub/grub.cfg | grep -v "recovery" | sed -E "s/^[[:space:]]*menuentry '([^']+)'.*$/\1/; s/^[[:space:]]*menuentry \"([^\"]+)\".*$/\1/" | grep -v "^if ")
+    
+    if [ ${#entries[@]} -eq 0 ]; then
+        echo -e "${Y}  Записи загрузки не найдены.${NC}"
+        return 0
+    fi
+
+    local i=0
+    for entry in "${entries[@]}"; do
+        echo "  $i) $entry"
+        ((i++))
+    done
+
+    local choice
+    read -p "  Загружать по умолчанию [0-$(( ${#entries[@]} - 1 ))]: " choice
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 0 ] && [ "$choice" -lt ${#entries[@]} ]; then
+        local selected="${entries[$choice]}"
+        
+        sed -i '/GRUB_DEFAULT=/d' /etc/default/grub
+        echo "GRUB_DEFAULT='$selected'" >> /etc/default/grub
+        
+        echo -e "${G}  ✔ Приоритет установлен: $selected${NC}"
+    else
+        echo -e "${Y}  Оставлено значение по умолчанию (обычно 0)${NC}"
+    fi
+}
+
+# --- Финализация ---
 
 finalize() {
     run_task "Восстановление системных скриптов" \
@@ -155,14 +234,15 @@ finalize() {
     run_task "Пересборка загрузчика" \
         "apt-get install -y --reinstall grub-efi-amd64-signed shim-signed os-prober && grub-install --target=x86_64-efi --recheck"
 
-    run_task "Обновление конфигурации GRUB" \
+    run_task "Генерация конфигурации GRUB" \
         "export GRUB_DISABLE_OS_PROBER=false && update-grub"
 }
 
 show_menu() {
-    echo -e "\n${C}┌── ИТОГОВОЕ МЕНЮ (НАЙДЕННЫЕ ОС) ──────────────────────────┐${NC}"
+    echo -e "\n${C}┌── ИТОГОВОЕ МЕНЮ ─────────────────────────────────────────┐${NC}"
     if [ -f /boot/grub/grub.cfg ]; then
-        grep -E "menuentry '|^menuentry \"" /boot/grub/grub.cfg | cut -d\"'\" -f2 | cut -d'\"' -f2 | grep -v "recovery" | sort -u | while read -r line; do
+        # ИСПРАВЛЕНИЕ 2 (повтор для финального вывода): учитываем отступы
+        grep -E "^[[:space:]]*menuentry ['\"]" /boot/grub/grub.cfg | grep -v "recovery" | sed -E "s/^[[:space:]]*menuentry '([^']+)'.*$/\1/; s/^[[:space:]]*menuentry \"([^\"]+)\".*$/\1/" | grep -v "^if " | sort -u | while read -r line; do
             echo -e "${C}│${NC}  > $line"
         done
     fi
@@ -181,19 +261,26 @@ done
 
 # --- Main ---
 if [ "$EUID" -ne 0 ]; then
-    echo "Root required!"
+    echo "Root required! Run with sudo."
     exit 1
 fi
 
 print_header
 
-# Бэкап перед внесением изменений (или сообщить что было бы сделано в dry-run)
+# Бэкап
 backup_files
 
+# Автоматические фиксы
 fast_fix
 apply_gfx_settings
-install_theme_stable
+prepare_themes
+
+# Интерактивная часть
+select_theme_interactive
+select_boot_priority
+
+# Применение изменений
 finalize
 show_menu
 
-echo -e "\n${G}✨ Готово! Все операции завершены успешно.${NC}\n"
+echo -e "\n${G}✨ Готово! Перезагрузите систему.${NC}\n"
